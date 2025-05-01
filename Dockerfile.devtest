@@ -1,0 +1,113 @@
+# check=skip=SecretsUsedInArgOrEnv
+
+# Description: Dockerfile for HSF Nginx with Certbot
+
+FROM nginx:stable
+
+LABEL org.opencontainers.image.title="HSF Nginx with Certbot"
+LABEL org.opencontainers.image.description="Nginx Reverse Proxy with Certbot configured for serving the HSF WWW site"
+LABEL org.opencontainers.image.authors="jonathan@hyrysoftwarefoundation.org"
+
+EXPOSE 80/tcp
+EXPOSE 443/tcp
+
+ENV HSF_DOMAIN="hyrysoftwarefoundation.org"
+ENV HSF_CONTACT="jonathan@hyrysoftwarefoundation.org"
+ENV HSF_BACKEND_SERVER="71.9.242.212"
+ENV HSF_BACKEND_PORT="8443"
+ENV HSF_DUMMYCERT_EXPIRY="3650"
+
+# This is not a secret... this is the key size for the RSA key used to generate
+#  domain certificates through Let's Encrypt via certbot.
+# Thus, the warning is ignored at the beginning of the file.
+ENV HSF_RSA_KEY_SIZE="8192"
+
+RUN apt-get update
+# Prepare for updating libxml2, krb5, and libheif to fix CVEs in the nginx stable image.
+RUN apt-get install -y --no-install-recommends --no-install-suggests \
+      git autoconf automake libtool libreadline8 zlib1g liblzma5 \
+      libreadline-dev zlib1g-dev liblzma-dev libc6-dev pkg-config \
+      python3 python3-dev make bison g++ libcmocka-dev libsocket-wrapper \
+      libresolv-wrapper cmake libx265-dev libpng-dev libjpeg-dev \
+      libde265-dev libaom-dev libdav1d-dev libgdk-pixbuf2.0-dev certbot \
+      python3-certbot-nginx python3-pip
+
+RUN dpkg -r --force-depends libxml2 libheif1
+
+# Update libxml2 to 2.13.8 to fix a bunch of CVEs in the nginx stable image.
+WORKDIR /tmp
+RUN git clone https://gitlab.gnome.org/GNOME/libxml2.git
+WORKDIR /tmp/libxml2
+RUN git checkout v2.13.8
+RUN ./autogen.sh
+RUN MAKE='gmake' CFLAGS='-O2 -fno-semantic-interposition' ./configure
+RUN make && make check
+RUN make install
+RUN ln -s /usr/local/lib/libxml2.so.2 /usr/lib/x86_64-linux-gnu/libxml2.so.2
+WORKDIR /tmp
+RUN rm -Rf libxml2
+
+# Update krb5 to 1.21.3 to fix CVE-2025-3576 in the nginx stable image.
+WORKDIR /tmp
+RUN git clone https://github.com/krb5/krb5.git
+WORKDIR /tmp/krb5
+RUN git checkout krb5-1.21.3-final
+WORKDIR /tmp/krb5/src
+RUN autoreconf --verbose
+RUN ./configure
+RUN make && make check
+RUN make install
+WORKDIR /tmp
+RUN rm -Rf krb5
+
+# Update libheif to 1.19.6 to fix multiple CVEs in the nginx stable image.
+WORKDIR /tmp
+RUN git clone https://github.com/strukturag/libheif.git
+WORKDIR /tmp/libheif
+RUN git checkout v1.19.6
+WORKDIR /tmp/libheif/build
+RUN cmake --preset=release ..
+RUN make
+RUN cmake --install .
+WORKDIR /tmp
+RUN rm -Rf libheif
+
+# At this point, all low, medium, high, and critical CVEs in the nginx
+#  stable image have now had fixes applied.
+
+COPY ./data/nginx/tmpl/hsf-site.conf.template /etc/nginx/conf.d/default.conf.template
+
+RUN dpkg --force-all -P git autoconf automake libtool libreadline-dev \
+      zlib1g-dev liblzma-dev libc6-dev pkg-config python3-dev make cmake \
+      libx265-dev libpng-dev libjpeg-dev libde265-dev libaom-dev \
+      libdav1d-dev libgdk-pixbuf2.0-dev g++ bison libcmocka-dev \
+      libresolv-wrapper libsocket-wrapper
+RUN apt-get --dry-run autoremove | grep -Po 'Remv \K[^ ]+' | xargs -r dpkg --force-all -P
+RUN apt-get clean -y
+RUN rm -Rf /var/lib/apt/lists/* /tmp/* /var/tmp/* /usr/share/doc
+
+# Install versions of certbot dependencies required to fix CVEs and GHSAs.
+RUN pip3 install --break-system-packages cryptography==43.0.1
+RUN pip3 install --break-system-packages certifi==2024.7.4
+RUN pip3 install --break-system-packages urllib3==1.26.19
+RUN pip3 install --break-system-packages idna==3.7
+RUN pip3 install --break-system-packages requests==2.32.0
+RUN pip3 install --break-system-packages configobj==5.0.9
+
+RUN dpkg -r --force-depends python3-pip
+
+WORKDIR /etc/letsencrypt
+COPY ./data/certbot/conf/options-ssl-nginx.conf /etc/letsencrypt/options-ssl-nginx.conf
+COPY ./data/certbot/conf/ssl-dhparams.pem /etc/letsencrypt/ssl-dhparams.pem
+
+WORKDIR /etc/letsencrypt/live/${HSF_DOMAIN}
+RUN openssl req -x509 -nodes -newkey rsa:${HSF_RSA_KEY_SIZE} \
+        -days ${HSF_DUMMYCERT_EXPIRY} -subj '/CN=localhost' \
+        -keyout 'privkey.pem' -out 'fullchain.pem'
+
+COPY --chmod=500 ./run/entrypoint.sh /hsf-www-proxy.sh
+RUN echo -n " &" >> /docker-entrypoint.sh
+
+ENTRYPOINT ["/hsf-www-proxy.sh"]
+
+CMD ["nginx", "-g", "daemon off;"]
