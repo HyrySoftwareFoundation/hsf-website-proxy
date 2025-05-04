@@ -8,7 +8,7 @@ jobs:
     - name: Build the hsf-nginx-certbot container image
       run: docker build . --file Dockerfile --tag hsf-nginx-certbot:wwwrevprox-gh
     - name: Scan the hsf-nginx-certbot container image
-    - uses: anchore/scan-action@v6
+      uses: anchore/scan-action@v6
       id: scan
       with:
         image: "hsf-nginx-certbot:wwwrevprox-gh"
